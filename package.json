@@ -1,0 +1,55 @@
+{
+  "name": "dsh-lobby-bot",
+  "version": "0.1.0",
+  "description": "DSH host plugin: an intranet chat room (Lobby) drives DSH's own sessions — live in the GUI, attached to each bot's workspace.",
+  "keywords": [
+    "deepseek-harness",
+    "deepseek-harness-plugin",
+    "dsh-plugin",
+    "chat-room",
+    "lobby",
+    "bot",
+    "sse",
+    "agent-bridge"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "bin": {
+    "dsh-lobby-bot-install": "bin/install.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dongzheJ/dsh-lobby-bot.git"
+  },
+  "homepage": "https://github.com/dongzheJ/dsh-lobby-bot#readme",
+  "bugs": {
+    "url": "https://github.com/dongzheJ/dsh-lobby-bot/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  }
+}

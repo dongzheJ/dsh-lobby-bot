@@ -1,0 +1,21 @@
+# dsh-lobby-bot bundle patch
+#
+# This package is a DSH profile bundle: `dsh plugin --profile web add dsh-lobby-bot`
+# merges this file into the profile's layer stack, which mounts one loader row.
+#
+# `url` + `token` are an optional pre-filled login: the plugin presents the token
+# at startup and everything after that — roster, registering a bot, the driver lock
+# — goes over HTTP with it. The token is the person's **personal token**. Leave
+# both out and log in from any session with `/lobby <url> <token>` instead.
+# `node bin/install.mjs --apply --url <url> --token <token>` writes this row with
+# them already filled in, for a host no human ever opens.
+#
+# The plugin reads no files from the lobby's repository: once logged in, the
+# roster, room creation and the driver lock are all HTTP.
+- insert:
+    - id: lobby-bot
+      name: 'dsh-lobby-bot'
+      config:
+        permissionPresets:
+          - lobby-bot-workspace
+          - danger-full-access
