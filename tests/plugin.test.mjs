@@ -21,7 +21,7 @@ import { buildDigest, formatPrompt, sessionTitle } from "../lib/prompt.mjs";
 import { LOBBY_HELP, parseLobbyCommand } from "../lib/command-input.mjs";
 import { SseParser } from "../lib/room-stream.mjs";
 import { diffRoster, expandRoster, pairKey } from "../lib/roster-diff.mjs";
-import { decideSession, SessionBook } from "../lib/session-book.mjs";
+import { adoptableLiveAgent, decideSession, SessionBook } from "../lib/session-book.mjs";
 import { botChainLength, maxBotChainOf, shouldTrigger, TurnQueue } from "../lib/turn-policy.mjs";
 import { inspect, install, revert } from "../bin/install.mjs";
 
@@ -157,6 +157,29 @@ test("prompt：首行自带标题所需信息，摘要只含别人的话", () =>
   assert.equal(sessionTitle({ nick: "小运", roomName: "运维" }), "【小运】 运维");
 });
 
+test("prompt：lobby 的能力说明书原样追加，只替换房间占位符", () => {
+  const prompt = formatPrompt({
+    bot: { ...bot, manual: "【Lobby 接口】\nPOST /api/rooms/{{roomId}}/cron\nEND" },
+    roomId: "ops",
+    roomName: "运维",
+    triggers: [human("@小运 建个任务")],
+    includeDigest: false,
+    now: new Date("2026-09-15T09:20:00Z"),
+  });
+  assert.match(prompt, /POST \/api\/rooms\/ops\/cron/);
+  assert.equal(prompt.includes("{{roomId}}"), false, "占位符必须被替换");
+  assert.equal(prompt.includes("END"), true, "说明书内容原样保留");
+
+  const none = formatPrompt({
+    bot,
+    roomId: "ops",
+    roomName: "运维",
+    triggers: [human("@小运 你好")],
+    includeDigest: false,
+  });
+  assert.equal(none.includes("Lobby 接口"), false, "没有说明书就不追加");
+});
+
 test("SSE 解析：跨 chunk、多行 data、注释与 id 都要处理对", () => {
   const parser = new SseParser();
   assert.deepEqual(parser.push(": keep-alive\n\nevent: pi"), [], "半帧不产出");
@@ -175,6 +198,20 @@ test("会话决策：记得住且宿主里还在就采纳，否则新建", () =>
   assert.deepEqual(decideSession({ remembered: "abc", resumable: true }), { action: "resume", sessionId: "abc" });
   assert.deepEqual(decideSession({ remembered: "abc", resumable: false }), { action: "create", sessionId: undefined, forgot: true });
   assert.deepEqual(decideSession({}), { action: "create", sessionId: undefined, forgot: false });
+});
+
+test("会话决策：GUI 已把会话 resume 成 live agent 时，驱动采纳它而不是硬抢写锁", () => {
+  const agent = { id: "lobby-5a" };
+  const self = {};
+  // GUI（或别的视图）持有同一 session 的 live agent，且没有别的房间驱动占着 → 采纳。
+  assert.equal(adoptableLiveAgent({ remembered: "lobby-5a", live: agent, owner: undefined, self }), agent);
+  // 没记住会话、或宿主里没有 live agent → 不采纳，走正常的 resume/create。
+  assert.equal(adoptableLiveAgent({ remembered: undefined, live: agent, owner: undefined, self }), undefined);
+  assert.equal(adoptableLiveAgent({ remembered: "lobby-5a", live: undefined, owner: undefined, self }), undefined);
+  // 已被另一个房间驱动绑定 → 不能采纳（一条会话只服务一个房间）。
+  assert.equal(adoptableLiveAgent({ remembered: "lobby-5a", live: agent, owner: {}, self }), undefined);
+  // 绑定给本驱动自己 → 仍可采纳（幂等重入）。
+  assert.equal(adoptableLiveAgent({ remembered: "lobby-5a", live: agent, owner: self, self }), agent);
 });
 
 test("会话账本：读写房间→会话映射，凭据与账本同存一个 0600 文件", async () => {
@@ -267,7 +304,7 @@ test("名册：返回全部 DSH bot，形状带齐一份配置该有的字段", 
           ok: true,
           rooms: [{ id: "general", name: "大厅" }],
           bots: [
-            { id: "xiaoyun", nick: "小运", driver: "dsh", enabled: true, rooms: ["general"], mode: "mention", botToken: "bt", workspace: "/w" },
+            { id: "xiaoyun", nick: "小运", driver: "dsh", enabled: true, rooms: ["general"], mode: "mention", botToken: "bt", workspace: "/w", manual: "POST /api/rooms/{{roomId}}/cron" },
             // 本地驱动的 bot 不归这个驱动管，必须被滤掉。
             { id: "localbot", nick: "本地", driver: "local", enabled: true, rooms: ["general"], botToken: "bt2" },
           ],
@@ -281,6 +318,8 @@ test("名册：返回全部 DSH bot，形状带齐一份配置该有的字段", 
   assert.equal(roster.bots[0].queueLimit, 3, "缺省值必须由服务端补齐，驱动侧不该猜");
   assert.equal(roster.bots[0].maxBotChain, 3);
   assert.equal(roster.bots[0].minIntervalMs, 2000);
+  assert.equal(roster.bots[0].manual, "POST /api/rooms/{{roomId}}/cron", "lobby 下发的能力说明书要原样带上");
+  assert.equal(roster.bots[0].exchangeSecret, undefined, "兑换密钥已内嵌进说明书，不再单独下发");
 });
 
 test("名册：凭据失效时报出的是「重新登录」，不是一句 HTTP 401", async () => {
@@ -513,6 +552,10 @@ test("roster 差分：新增开流、消失关流、行为参数变了重开、�
   // 改模式也算行为变化
   const modeChanged = diffRoster({ active, next: expandRoster({ rooms: [room], bots: [bot("a", { mode: "always" }), bot("b")] }) });
   assert.deepEqual(modeChanged.stop, ["a/general"]);
+
+  // lobby 下发的说明书变了也要重开：加能力/换时区必须在下一轮就生效，不等插件发版
+  const manualChanged = diffRoster({ active, next: expandRoster({ rooms: [room], bots: [bot("a", { manual: "POST /api/rooms/{{roomId}}/cron" }), bot("b")] }) });
+  assert.deepEqual(manualChanged.stop, ["a/general"]);
 
   // 房间名变了不算行为变化？算——标题要跟着改，但只影响标题，重开代价小，这里允许重开。
   const roomRenamed = diffRoster({ active, next: expandRoster({ rooms: [{ id: "general", name: "大厅2" }], bots: [bot("a"), bot("b")] }) });
