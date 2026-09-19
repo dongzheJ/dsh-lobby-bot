@@ -248,6 +248,34 @@ test("会话账本：读写房间→会话映射，凭据与账本同存一个 0
   }
 });
 
+test("会话账本：并发记账不会撞临时文件，也不会丢更新", async () => {
+  // 复现线上事故：同一个 DSH 宿主里两条定时任务在同一秒各开一个回合，两个
+  // `recordSession` 并发写同一个文件。旧实现共用 `<file>.<pid>.tmp`，先 rename
+  // 的把临时文件移走，后 rename 的拿到 ENOENT，整个宿主以 fatal 退出。
+  const home = await mkdtemp(path.join(tmpdir(), "lobby-store-race-"));
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  try {
+    const store = await LocalStore.load();
+    const book = await SessionBook.load({ store });
+    const bots = Array.from({ length: 8 }, (_, index) => `bot-${index}`);
+    await Promise.all(
+      bots.map((botId, index) =>
+        book.record({ botId, roomId: "general", sessionId: `s-${index}`, lastTurnAt: 1000 + index }),
+      ),
+    );
+    const reloaded = await SessionBook.load({ store: await LocalStore.load() });
+    for (const [index, botId] of bots.entries()) {
+      assert.equal(reloaded.get(botId, "general"), `s-${index}`, `${botId} 的会话不该被并发写覆盖`);
+      assert.equal(reloaded.lastTurnAt(botId, "general"), 1000 + index, `${botId} 的回合时间不该丢`);
+    }
+  } finally {
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("地址归一化：裸 host 补 http://，尾部斜杠去掉，非法值拒绝", () => {
   assert.equal(normalizeLobbyUrl("192.168.1.9:8770"), "http://192.168.1.9:8770");
   assert.equal(normalizeLobbyUrl("http://127.0.0.1:8770/"), "http://127.0.0.1:8770");
