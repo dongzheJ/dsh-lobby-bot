@@ -18,11 +18,12 @@ import { describeHolder, heartbeatLock, STALE_MS } from "../lib/lock.mjs";
 import { LocalStore, normalizeLobbyUrl } from "../lib/local-store.mjs";
 import { fetchRoster } from "../lib/roster.mjs";
 import { buildDigest, formatPrompt, sessionTitle } from "../lib/prompt.mjs";
+import { formatQuestionMessage, matchOption, noAnswer, parseAnswer, parseSingle, stripMentions } from "../lib/question.mjs";
 import { LOBBY_HELP, parseLobbyCommand } from "../lib/command-input.mjs";
 import { SseParser } from "../lib/room-stream.mjs";
 import { diffRoster, expandRoster, pairKey } from "../lib/roster-diff.mjs";
 import { adoptableLiveAgent, decideSession, SessionBook } from "../lib/session-book.mjs";
-import { botChainLength, maxBotChainOf, shouldTrigger, TurnQueue } from "../lib/turn-policy.mjs";
+import { botChainLength, maxBotChainOf, shouldTrigger, TurnQueue, workingForStatus } from "../lib/turn-policy.mjs";
 import { inspect, install, revert } from "../bin/install.mjs";
 
 /** A bot configuration as the roster produces it. */
@@ -47,6 +48,14 @@ test("触发策略：mention 只认被点名，always 认所有人类发言并�
     shouldTrigger({ bot, event: "mention", message: { kind: "bot", author: { id: "bot_xiaoyun" }, text: "@小运 我自己" }, now: 1e9 }),
     false,
   );
+});
+
+test("工作状态映射：只有 running 算忙，idle 与未知（含无会话）都算不忙", () => {
+  assert.equal(workingForStatus("running"), true);
+  assert.equal(workingForStatus("idle"), false);
+  // A driver with no attached session has no status at all — not working.
+  assert.equal(workingForStatus(undefined), false);
+  assert.equal(workingForStatus(null), false);
 });
 
 test("触发策略：别的 bot 的发言受会话预算约束，人类点名不受冷却约束", () => {
@@ -178,6 +187,128 @@ test("prompt：lobby 的能力说明书原样追加，只替换房间占位符",
     includeDigest: false,
   });
   assert.equal(none.includes("Lobby 接口"), false, "没有说明书就不追加");
+});
+
+test("prompt：代答回合以本体身份回答，并带上授权边界", () => {
+  // The lobby marks a stand-in trigger: an explicit @ of an offline principal.
+  const trigger = {
+    kind: "human",
+    author: { id: "u2", nick: "小张" },
+    text: "@阿哲 合同确认下",
+    meta: { standInFor: { id: "u_owner", nick: "阿哲" } },
+  };
+  const prompt = formatPrompt({
+    bot: { ...bot, avatar: { enabled: true, standIn: true, mandate: "只谈工作，不承诺价格" } },
+    roomId: "general",
+    roomName: "大厅",
+    triggers: [trigger],
+    includeDigest: false,
+    now: new Date("2026-09-15T09:20:00Z"),
+  });
+  assert.equal(prompt.includes("阿哲"), true, "应点名本体");
+  assert.equal(prompt.includes("替身"), true, "应说明是替身代答");
+  assert.equal(prompt.includes("只谈工作，不承诺价格"), true, "应带上授权边界");
+
+  // A normal turn carries no marker and gets no stand-in instruction.
+  const plain = formatPrompt({
+    bot,
+    roomId: "general",
+    roomName: "大厅",
+    triggers: [human("@小运 你好")],
+    includeDigest: false,
+  });
+  assert.equal(plain.includes("替身"), false);
+});
+
+test("反问：去掉 @ 与开头裸昵称，正文不受影响", () => {
+  assert.equal(stripMentions("@小运 选 2", ["小运"]), "选 2");
+  assert.equal(stripMentions("小运，就第二个吧", ["小运"]), "就第二个吧");
+  assert.equal(stripMentions("@小运@小助 都要", ["小运", "小助"]), "都要");
+  // 昵称出现在正文中间时不能删，那可能是答案本身。
+  assert.equal(stripMentions("@小运 小运就是我的答案", ["小运"]), "小运就是我的答案");
+  assert.equal(stripMentions("没有点名", ["小运"]), "没有点名");
+});
+
+test("反问：格式化带选项与多问题提示", () => {
+  const single = formatQuestionMessage({
+    nick: "小运",
+    questions: [{
+      id: "q1",
+      header: "确认",
+      question: "用哪个数据库？",
+      options: [{ label: "Postgres", description: "事务更强" }, { label: "SQLite" }],
+    }],
+  });
+  assert.match(single, /❓ 确认：用哪个数据库？/);
+  assert.match(single, /1\) Postgres — 事务更强/);
+  assert.match(single, /2\) SQLite/);
+  assert.match(single, /@小运 回复序号或选项文字即可/);
+
+  const multi = formatQuestionMessage({
+    nick: "小运",
+    questions: [{ id: "a", question: "先做哪个？" }, { id: "b", question: "什么时候？" }],
+  });
+  assert.match(multi, /❓ 1\. 先做哪个？/);
+  assert.match(multi, /❓ 2\. 什么时候？/);
+  assert.match(multi, /每个问题一行/);
+});
+
+test("反问：序号、label、多选、自由文本都能读成答案", () => {
+  const question = {
+    id: "q1",
+    options: [{ label: "Postgres" }, { label: "SQLite" }],
+  };
+  assert.deepEqual(matchOption(question, "2"), "SQLite");
+  assert.deepEqual(matchOption(question, "postgres"), "Postgres");
+  assert.deepEqual(matchOption(question, "3"), undefined);
+  assert.deepEqual(parseSingle(question, "2"), { id: "q1", selected: ["SQLite"] });
+  assert.deepEqual(parseSingle(question, "Postgres"), { id: "q1", selected: ["Postgres"] });
+  // 单选问题写多个词，只要都是选项就取第一个。
+  assert.deepEqual(parseSingle(question, "1,2"), { id: "q1", selected: ["Postgres"] });
+  // 带态度的话不能吞成选项。
+  assert.deepEqual(parseSingle(question, "2 号，但先别动"), { id: "q1", selected: [], custom: "2 号，但先别动" });
+  // 多选问题按逗号拆。
+  assert.deepEqual(
+    parseSingle({ ...question, multiSelect: true }, "Postgres、SQLite"),
+    { id: "q1", selected: ["Postgres", "SQLite"] },
+  );
+  // 没有选项时整句是自由文本。
+  assert.deepEqual(parseSingle({ id: "q2" }, "随便"), { id: "q2", selected: [], custom: "随便" });
+});
+
+test("反问：多问题按行序或编号对应，缺一个就拒收", () => {
+  const questions = [
+    { id: "a", options: [{ label: "是" }, { label: "否" }] },
+    { id: "b" },
+  ];
+  assert.deepEqual(parseAnswer({ questions, text: "1\n下周一" }), {
+    answers: [
+      { id: "a", selected: ["是"] },
+      { id: "b", selected: [], custom: "下周一" },
+    ],
+  });
+  assert.deepEqual(parseAnswer({ questions, text: "2. 下周一\n1. 否" }), {
+    answers: [
+      { id: "a", selected: ["否"] },
+      { id: "b", selected: [], custom: "下周一" },
+    ],
+  });
+  // 只答了一个问题：拒收，让驱动重问，而不是答一半。
+  assert.equal(parseAnswer({ questions, text: "1" }), undefined);
+  assert.equal(parseAnswer({ questions, text: "" }), undefined);
+  // 单问题直接吃整段正文。
+  assert.deepEqual(parseAnswer({ questions: [{ id: "a" }], text: "就这样" }), {
+    answers: [{ id: "a", selected: [], custom: "就这样" }],
+  });
+});
+
+test("反问：超时答案形状合法，字段齐全", () => {
+  const answer = noAnswer([{ id: "a" }, { id: "b" }], "没人回答，自行继续");
+  assert.equal(answer.answers.length, 2);
+  for (const item of answer.answers) {
+    assert.equal(Array.isArray(item.selected), true);
+    assert.equal(item.custom, "没人回答，自行继续");
+  }
 });
 
 test("SSE 解析：跨 chunk、多行 data、注释与 id 都要处理对", () => {
