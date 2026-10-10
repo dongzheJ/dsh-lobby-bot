@@ -21,6 +21,7 @@ import { buildDigest, formatPrompt, sessionTitle } from "../lib/prompt.mjs";
 import { formatQuestionMessage, matchOption, noAnswer, parseAnswer, parseSingle, stripMentions } from "../lib/question.mjs";
 import { LOBBY_HELP, parseLobbyCommand } from "../lib/command-input.mjs";
 import { SseParser } from "../lib/room-stream.mjs";
+import { contentText, formatGoalWrap, parseGoalWrap } from "../lib/goal-wrap.mjs";
 import { diffRoster, expandRoster, pairKey } from "../lib/roster-diff.mjs";
 import { adoptableLiveAgent, decideSession, SessionBook } from "../lib/session-book.mjs";
 import { botChainLength, maxBotChainOf, shouldTrigger, TurnQueue, workingForStatus } from "../lib/turn-policy.mjs";
@@ -719,4 +720,45 @@ test("roster 差分：新增开流、消失关流、行为参数变了重开、�
   // 房间名变了不算行为变化？算——标题要跟着改，但只影响标题，重开代价小，这里允许重开。
   const roomRenamed = diffRoster({ active, next: expandRoster({ rooms: [{ id: "general", name: "大厅2" }], bots: [bot("a"), bot("b")] }) });
   assert.equal(roomRenamed.stop.length, 2);
+});
+
+test("目标收尾：认得出 complete/blocked 通知，别的会话事件不误判", () => {
+  const notice = (text, extra = {}) => ({ source: { kind: "tool-goal", form: "notice", ...extra }, content: [{ type: "text", text }] });
+
+  const complete = parseGoalWrap(notice('<goal_complete>\nObjective: "把官网 GEO 优化做完"\nThe goal is marked complete…\n</goal_complete>'));
+  assert.deepEqual(complete, { kind: "complete", objective: "把官网 GEO 优化做完", blockedReason: undefined });
+
+  const blocked = parseGoalWrap(notice('<goal_blocked>\nObjective: "补文章长度"\nBlocked: "缺翻译"\nThe goal is marked blocked…\n</goal_blocked>'));
+  assert.equal(blocked.kind, "blocked");
+  assert.equal(blocked.blockedReason, "缺翻译");
+
+  // 目标里的引号是 JSON 编码过的，解码后要原样还回来，不能被截断。
+  const quoted = parseGoalWrap(notice('<goal_complete>\nObjective: "把 \\"wpdj.com\\" 弄好"\n</goal_complete>'));
+  assert.equal(quoted.objective, '把 "wpdj.com" 弄好');
+
+  // 自主轮的继续提示不是收尾；普通房间消息、别的来源都不算。
+  assert.equal(parseGoalWrap(notice("<goal_round>\nObjective: \"x\"\nRound: 2/9\n</goal_round>")), undefined);
+  assert.equal(parseGoalWrap({ source: { kind: "user" }, content: [{ type: "text", text: "<goal_complete>" }] }), undefined);
+  assert.equal(parseGoalWrap(undefined), undefined);
+});
+
+test("目标收尾：成文进房间，带【目标完成/受阻】抬头，没正文时回落到元数据", () => {
+  const complete = { kind: "complete", objective: "做完 GEO" };
+  const blocked = { kind: "blocked", objective: "补文章", blockedReason: "缺翻译" };
+
+  assert.equal(
+    formatGoalWrap({ wrap: complete, body: "搞定 ✅ 全部上线并验证。\n" }),
+    "【目标完成】\n\n搞定 ✅ 全部上线并验证。",
+  );
+  // 没有收尾正文（回合被取消/模型没吐字）时，用目标自身的信息兜底，房间仍知道结果。
+  assert.equal(formatGoalWrap({ wrap: complete, body: "" }), "【目标完成】\n\n做完 GEO");
+  assert.equal(formatGoalWrap({ wrap: blocked, body: "" }), "【目标受阻】\n\n缺翻译");
+  assert.equal(formatGoalWrap({ wrap: { kind: "complete" }, body: "" }), "【目标完成】");
+
+  // 只拼 text 块，且忽略非文本块。
+  assert.equal(
+    contentText([{ type: "text", text: "a" }, { type: "tool-call", name: "x" }, { type: "text", text: "b" }]),
+    "ab",
+  );
+  assert.equal(contentText(undefined), "");
 });
