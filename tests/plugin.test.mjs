@@ -229,6 +229,11 @@ test("prompt：被引用消息随触发行呈现，引用不在窗口时给中�
   const serverTrigger = { seq: 9, id: "m9", kind: "human", author: { id: "u2", nick: "小张" }, text: "@小运 看这个", replyTo: "old", quoted: { nick: "老王", excerpt: "很旧的一句话" } };
   const serverPrompt = formatPrompt({ bot, roomId: "ops", roomName: "运维", triggers: [serverTrigger], includeDigest: false, lookup: () => undefined });
   assert.equal(serverPrompt.includes("（引用 老王：很旧的一句话）"), true);
+
+  // 服务端标了截断：给出 messageId 句柄，bot 好据此读全文。
+  const truncated = { seq: 10, id: "m10", kind: "human", author: { id: "u2", nick: "小张" }, text: "@小运 看这个", replyTo: "old", quoted: { nick: "老王", excerpt: "很长的一段…", id: "m_old", truncated: true } };
+  const truncatedPrompt = formatPrompt({ bot, roomId: "ops", roomName: "运维", triggers: [truncated], includeDigest: false });
+  assert.equal(truncatedPrompt.includes("（引用 老王：很长的一段…）（已截断，全文用 messageId=m_old 读）"), true);
 });
 
 test("prompt：代答回合以本体身份回答，并带上授权边界", () => {
