@@ -190,6 +190,42 @@ test("prompt：lobby 的能力说明书原样追加，只替换房间占位符",
   assert.equal(none.includes("Lobby 接口"), false, "没有说明书就不追加");
 });
 
+test("prompt：被引用消息随触发行呈现，引用不在窗口时给中性提示", () => {
+  const quoted = { seq: 1, id: "m1", kind: "human", author: { id: "u1", nick: "阿哲" }, text: "今天先做这个" };
+  const trigger = { seq: 2, id: "m2", kind: "human", author: { id: "u2", nick: "小张" }, text: "@小运 按这个来", replyTo: "m1" };
+  const messages = [quoted, trigger];
+  const lookup = (id) => messages.find((message) => message.id === id);
+
+  const digest = buildDigest({ messages, botId: "xiaoyun", lookup });
+  assert.equal(digest.includes("（引用 阿哲：今天先做这个）"), true);
+
+  const prompt = formatPrompt({
+    bot,
+    roomId: "ops",
+    roomName: "运维",
+    triggers: [trigger],
+    includeDigest: false,
+    lookup,
+    now: new Date("2026-09-15T09:20:00Z"),
+  });
+  assert.equal(prompt.includes("（引用 阿哲：今天先做这个）"), true);
+
+  // 引用消息不在窗口里：中性提示，不编造正文。
+  const missing = formatPrompt({ bot, roomId: "ops", roomName: "运维", triggers: [trigger], includeDigest: false, lookup: () => undefined });
+  assert.equal(missing.includes("（引用了一条不在当前窗口的消息）"), true);
+
+  // 引用的是文件：给文件名，不给正文。
+  const file = { seq: 0, id: "f1", kind: "human", author: { id: "u3", nick: "小李" }, text: "", meta: { file: { name: "报告.pdf", type: "application/pdf" } } };
+  const fileTrigger = { seq: 3, id: "m3", kind: "human", author: { id: "u2", nick: "小张" }, text: "@小运 这个文件", replyTo: "f1" };
+  const fileDigest = buildDigest({ messages: [file, fileTrigger], botId: "xiaoyun", lookup: (id) => [file, fileTrigger].find((message) => message.id === id) });
+  assert.equal(fileDigest.includes("（引用 小李：[文件] 报告.pdf）"), true);
+  assert.equal(fileDigest.includes("选择这个文件"), false, "不能编造文件正文");
+
+  // 没有 replyTo 的行不带引用块。
+  const plain = buildDigest({ messages: [human("普通消息")], botId: "xiaoyun", lookup });
+  assert.equal(plain.includes("引用"), false);
+});
+
 test("prompt：代答回合以本体身份回答，并带上授权边界", () => {
   // The lobby marks a stand-in trigger: an explicit @ of an offline principal.
   const trigger = {
