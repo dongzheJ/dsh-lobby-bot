@@ -224,6 +224,11 @@ test("prompt：被引用消息随触发行呈现，引用不在窗口时给中�
   // 没有 replyTo 的行不带引用块。
   const plain = buildDigest({ messages: [human("普通消息")], botId: "xiaoyun", lookup });
   assert.equal(plain.includes("引用"), false);
+
+  // 服务端解析好的 quoted 优先于本地窗口（覆盖窗口里没有的旧引用）。
+  const serverTrigger = { seq: 9, id: "m9", kind: "human", author: { id: "u2", nick: "小张" }, text: "@小运 看这个", replyTo: "old", quoted: { nick: "老王", excerpt: "很旧的一句话" } };
+  const serverPrompt = formatPrompt({ bot, roomId: "ops", roomName: "运维", triggers: [serverTrigger], includeDigest: false, lookup: () => undefined });
+  assert.equal(serverPrompt.includes("（引用 老王：很旧的一句话）"), true);
 });
 
 test("prompt：代答回合以本体身份回答，并带上授权边界", () => {
